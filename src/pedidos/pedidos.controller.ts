@@ -1,13 +1,14 @@
 import { Body, Controller, Param, ParseIntPipe, Post, Put, Query } from '@nestjs/common';
 import { PedidosService } from './pedidos.service';
+import { CrearPedidoDto } from './dto/crear-pedido.dto';
 
 @Controller('pedidos')
 export class PedidosController {
   constructor(private readonly service: PedidosService) {}
 
-  @Post()
-  crear(@Body() body: { nombreCliente: string; cantidad: number; productos: number[] }) {
-    return this.service.crear(body.nombreCliente, body.cantidad, body.productos);
+   @Post()
+  crear(@Body() dto: CrearPedidoDto) {
+    return this.service.crear(dto);
   }
 
   @Put(':id/enviar')

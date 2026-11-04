@@ -1,53 +1,62 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Estado } from '../generated/prisma/enums';
 import { PrismaService } from '../prisma/prisma.service';
+import { CrearPedidoDto } from './dto/crear-pedido.dto';
 
 @Injectable()
 export class PedidosService {
   constructor(private prisma: PrismaService) {}
 
-  // CREAR PEDIDO
-  async crear(nombreCliente: string, cantidad: number, idsProductos: number[]) {
-    // Regla: no puede tener otro pedido pendiente
-    const pendiente = await this.prisma.pedido.findFirst({
-      where: { nombreCliente, estado: Estado.PENDIENTE },
-    });
-    if (pendiente) {
-      throw new BadRequestException('El cliente ya tiene un pedido pendiente');
-    }
+    // CREAR PEDIDO (todo dentro de una transacción: o se guarda todo, o nada)
+  async crear(dto: CrearPedidoDto) {
+    const { nombreCliente, cantidad, productos: ids } = dto;
 
-    for (const id of idsProductos) {
-      // Regla: el producto debe existir
-      const producto = await this.prisma.producto.findUnique({ where: { id } });
-      if (!producto) {
-        throw new BadRequestException(`El producto ${id} no existe`);
-      }
-
-      // Regla: debe haber stock suficiente
-      if (producto.stock < cantidad) {
-        throw new BadRequestException(`No hay stock suficiente de ${producto.nombre}`);
-      }
-    }
-
-    // El stock baja al hacer el pedido
-    for (const id of idsProductos) {
-      await this.prisma.producto.update({
-        where: { id },
-        data: { stock: { decrement: cantidad } },
+    return this.prisma.$transaction(async (tx) => {
+      // Regla: no puede tener otro pedido pendiente
+      const pendiente = await tx.pedido.findFirst({
+        where: { nombreCliente, estado: Estado.PENDIENTE },
       });
-    }
+      if (pendiente) {
+        throw new BadRequestException('El cliente ya tiene un pedido pendiente');
+      }
 
-    return this.prisma.pedido.create({
-      data: {
-        nombreCliente,
-        cantidad,
-        estado: Estado.PENDIENTE,
-        productos: { connect: idsProductos.map((id) => ({ id })) },
-      },
-      include: { productos: true },
+      // Regla: todos los productos deben existir (una sola consulta)
+      const productos = await tx.producto.findMany({
+        where: { id: { in: ids } },
+      });
+      if (productos.length !== ids.length) {
+        const encontrados = new Set(productos.map((p) => p.id));
+        const faltantes = ids.filter((id) => !encontrados.has(id));
+        throw new BadRequestException(
+          `Los productos no existen: ${faltantes.join(', ')}`,
+        );
+      }
+
+      // Regla: stock suficiente. El descuento es atómico: solo se aplica
+      // si todavía hay stock, así nunca queda en negativo.
+      for (const producto of productos) {
+        const resultado = await tx.producto.updateMany({
+          where: { id: producto.id, stock: { gte: cantidad } },
+          data: { stock: { decrement: cantidad } },
+        });
+        if (resultado.count === 0) {
+          throw new BadRequestException(
+            `No hay stock suficiente de ${producto.nombre}`,
+          );
+        }
+      }
+
+      return tx.pedido.create({
+        data: {
+          nombreCliente,
+          cantidad,
+          estado: Estado.PENDIENTE,
+          productos: { connect: ids.map((id) => ({ id })) },
+        },
+        include: { productos: true },
+      });
     });
   }
-
   // PENDIENTE -> ENVIADO (aquí se genera el código)
   async enviar(id: number) {
     const pedido = await this.buscar(id);
